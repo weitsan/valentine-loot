@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FF14 Valentine Loot Simulator</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@900&display=swap');
+
+        body {
+            margin: 0;
+            background-color: #000;
+            overflow: hidden;
+            touch-action: none;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        canvas {
+            box-shadow: 0 0 30px rgba(0,0,0,0.8);
+            /* 背景圖設定：
+               請將您的圖片檔命名為 "background.png" 
+               並放在與此 HTML 檔案相同的資料夾中。
+            */
+            background-image: url('./background.png');
+            
+            background-size: cover;
+            background-position: center;
+            border-radius: 8px; 
+        }
+        /* 影片樣式：預設隱藏，播放時覆蓋全螢幕 */
+        #mugoVideo {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* 保持比例填滿 */
+            z-index: 50; /* 確保在 Canvas 之上 */
+            background: black;
+        }
+    </style>
+</head>
+<body>
+
+<!-- 新增影片標籤 -->
+<video id="mugoVideo" playsinline>
+    <source src="./mugo.mp4" type="video/mp4">
+</video>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+(() => {
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const video = document.getElementById('mugoVideo'); // 取得影片元素
+
+    // --- 圖片資源設定 ---
+    const ASSETS = {
+        item1: './1.png',
+        item2: './2.png',
+        item3: './3.png'
+    };
+
+    const imgs = {};
+    let imagesLoaded = false;
+
+    // --- 載入圖片 ---
+    function loadAssets() {
+        let loadedCount = 0;
+        const total = Object.keys(ASSETS).length;
+        for (const [key, url] of Object.entries(ASSETS)) {
+            const img = new Image();
+            img.src = url;
+            img.onload = () => {
+                loadedCount++;
+                if (loadedCount >= total) imagesLoaded = true;
+            };
+            img.onerror = () => {
+                console.warn(`圖片載入失敗: ${url}，將顯示佔位色塊`);
+                loadedCount++;
+                if (loadedCount >= total) imagesLoaded = true;
+            };
+            imgs[key] = img;
+        }
+    }
+    loadAssets();
+
+    // --- 遊戲狀態 ---
+    const STATE = { READY: 0, VIDEO: 1, VICTORY: 2, LOOT: 3 }; // 新增 VIDEO 狀態
+    let currentState = STATE.READY;
+
+    const dungeonName = "2026 情人節約會 (零式)";
+    
+    // 物品清單 (改為使用圖片 Key)
+    const lootItems = [
+        { id: 1, name: "免死金牌 (不可以生氣券)", imgKey: "item1", rolling: false, val: 0, finished: false },
+        { id: 2, name: "絕對買單券 (限今日)", imgKey: "item2", rolling: false, val: 0, finished: false },
+        { id: 3, name: "許願券 (啥都可以)", imgKey: "item3", rolling: false, val: 0, finished: false }
+    ];
+    let selectedItemIndex = 0; 
+    let chatLog = [];
+
+    // --- 動畫變數 ---
+    let readyTimer = 45.0; // 參加介面倒數 (45秒)
+    let lootTimer = 280.0; // 戰利品介面倒數 (280秒)
+    let victoryScale = 2.0;
+    let victoryOpacity = 0;
+
+    // --- 初始化 ---
+    let w, h;
+    function resize() {
+        w = canvas.width = window.innerWidth;
+        h = canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- 繪圖輔助 ---
+    
+    function drawRoundRect(ctx, x, y, w, h, r) {
+        if (w < 0) w = 0; if (h < 0) h = 0;
+        if (w < 2 * r) r = w / 2; if (h < 2 * r) r = h / 2;
+        if (r < 0) r = 0;
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+    }
+
+    function drawWindow(x, y, width, height) {
+        if (width <= 0 || height <= 0) return;
+        
+        // 視窗背景漸層
+        const grad = ctx.createLinearGradient(x, y, x, y + height);
+        grad.addColorStop(0, 'rgba(46, 46, 53, 0.95)');
+        grad.addColorStop(1, 'rgba(26, 26, 32, 0.95)');
+        ctx.fillStyle = grad;
+        
+        drawRoundRect(ctx, x, y, width, height, 10);
+        ctx.fill();
+
+        // 外邊框
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#5c5c63';
+        ctx.stroke();
+        
+        // 內亮線
+        if (width > 4 && height > 4) {
+            drawRoundRect(ctx, x+2, y+2, width-4, height-4, 8);
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+
+    function drawText(text, x, y, size, color, align = 'left', font = 'Noto Sans TC') {
+        ctx.fillStyle = color;
+        ctx.font = `${size}px "${font}"`;
+        ctx.textAlign = align;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, x, y);
+    }
+
+    // 繪製圖片輔助函式
+    function drawImg(key, x, y, w, h) {
+        if (imagesLoaded && imgs[key]) {
+            // 繪製圖片，保持比例填滿或拉伸
+            ctx.drawImage(imgs[key], x, y, w, h);
+        } else {
+            // 如果圖片還沒載入或失敗，畫一個灰色方塊
+            ctx.fillStyle = '#444';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = '#666';
+            ctx.strokeRect(x, y, w, h);
+            
+            // 畫個問號
+            ctx.fillStyle = '#888';
+            ctx.font = '20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('?', x + w/2, y + h/2);
+        }
+    }
+
+    // --- 渲染：排本視窗 ---
+    function renderReady() {
+        // 清除畫布
+        ctx.clearRect(0, 0, w, h);
+        
+        // 半透明遮罩
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.fillRect(0, 0, w, h);
+        
+        const winW = Math.min(w * 0.9, 400);
+        const winH = 220;
+        const winX = (w - winW) / 2;
+        const winY = (h - winH) / 2;
+
+        drawWindow(winX, winY, winW, winH);
+
+        // 標題
+        ctx.shadowColor = 'rgba(0,0,0,0.8)';
+        ctx.shadowBlur = 4;
+        drawText("任務配對成功", winX + winW/2, winY + 30, 20, '#e2c286', 'center', 'Noto Serif TC');
+        ctx.shadowBlur = 0;
+        
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+        ctx.beginPath();
+        ctx.moveTo(winX + 20, winY + 50);
+        ctx.lineTo(winX + winW - 20, winY + 50);
+        ctx.stroke();
+
+        // Icon
+        ctx.fillStyle = '#222';
+        ctx.fillRect(winX + 30, winY + 70, 50, 50);
+        ctx.strokeStyle = '#666';
+        ctx.strokeRect(winX + 30, winY + 70, 50, 50);
+        drawText("⚔️", winX + 55, winY + 97, 30, '#fff', 'center');
+
+        drawText(dungeonName, winX + 90, winY + 80, 16, '#fff', 'left');
+        drawText("平均等待時間: 一輩子", winX + 90, winY + 105, 12, '#aaa', 'left');
+        
+        // 倒數文字邏輯：顯示 readyTimer
+        let readySec = Math.ceil(readyTimer);
+        drawText("剩餘時間: " + readySec, winX + 90, winY + 125, 12, '#e2c286', 'left');
+
+        // 倒數條背景
+        const barW = winW - 60;
+        const barH = 6;
+        const barX = winX + 30;
+        const barY = winY + 140;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(barX, barY, barW, barH);
+        
+        // 計算倒數：每幀減少 (假設60fps)
+        readyTimer -= 0.016; // 約 1/60 秒
+        if (readyTimer < 0) readyTimer = 0; // 防止負數
+
+        // 倒數條填色：根據 45 秒總長計算比例
+        const fillW = barW * (readyTimer / 45.0);
+        
+        const grad = ctx.createLinearGradient(barX, 0, barX + fillW, 0);
+        grad.addColorStop(0, '#8ba4b8');
+        grad.addColorStop(1, '#bde0fe');
+        ctx.fillStyle = grad;
+        ctx.fillRect(barX, barY, fillW, barH);
+
+        // 參加按鈕
+        const btnW = 120;
+        const btnH = 36;
+        const btnX = winX + winW - btnW - 30;
+        const btnY = winY + 165;
+        const btnGrad = ctx.createLinearGradient(0, btnY, 0, btnY + btnH);
+        btnGrad.addColorStop(0, '#666');
+        btnGrad.addColorStop(1, '#333');
+        ctx.fillStyle = btnGrad;
+        drawRoundRect(ctx, btnX, btnY, btnW, btnH, 4);
+        ctx.fill();
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        
+        drawText("參加", btnX + btnW/2, btnY + btnH/2, 14, '#fff', 'center');
+        drawText("放棄", winX + 60, btnY + btnH/2, 14, '#666', 'center');
+    }
+
+    function renderVictory() {
+        ctx.clearRect(0, 0, w, h);
+        
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(0, 0, w, h);
+        
+        if (victoryScale > 1) victoryScale -= 0.05;
+        if (victoryOpacity < 1) victoryOpacity += 0.02;
+        ctx.save();
+        ctx.translate(w/2, h/2);
+        ctx.scale(victoryScale, victoryScale);
+        ctx.font = "900 40px 'Noto Serif TC'";
+        ctx.textAlign = "center";
+        ctx.shadowColor = "rgba(212, 175, 55, 0.8)";
+        ctx.shadowBlur = 20;
+        ctx.fillStyle = `rgba(226, 194, 134, ${victoryOpacity})`;
+        ctx.fillText("DUTY COMPLETE", 0, 0);
+        ctx.restore();
+    }
+
+    function renderLoot() {
+        ctx.clearRect(0, 0, w, h);
+        
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(0, 0, w, h);
+
+        const winW = Math.min(w * 0.95, 500);
+        const winH = 320; 
+        const winX = (w - winW) / 2;
+        const winY = (h - winH) / 2;
+
+        drawWindow(winX, winY, winW, winH);
+        
+        drawText("分配方式：通常", winX + winW/2, winY + 40, 15, '#e2c286', 'center', 'Noto Sans TC');
+
+        const currentItem = lootItems[selectedItemIndex];
+        ctx.shadowColor = '#000';
+        ctx.shadowBlur = 4;
+        drawText(currentItem.name, winX + winW/2, winY + 80, 22, '#fff', 'center', 'Noto Sans TC');
+        ctx.shadowBlur = 0;
+
+        // 物品列表
+        const iconSize = 56;
+        const gap = 12;
+        const totalIconW = (lootItems.length * iconSize) + ((lootItems.length - 1) * gap);
+        const startIconX = winX + (winW - totalIconW) / 2;
+        const iconY = winY + 110;
+
+        lootItems.forEach((item, index) => {
+            const ix = startIconX + index * (iconSize + gap);
+            
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(ix, iconY, iconSize, iconSize);
+            
+            // 改為繪製圖片
+            drawImg(item.imgKey, ix, iconY, iconSize, iconSize);
+
+            if (index === selectedItemIndex) {
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#fff7cc'; 
+                ctx.strokeRect(ix, iconY, iconSize, iconSize);
+                
+                ctx.shadowColor = '#d4af37';
+                ctx.shadowBlur = 15;
+                ctx.strokeRect(ix, iconY, iconSize, iconSize);
+                ctx.shadowBlur = 0;
+            } else {
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = '#555';
+                ctx.strokeRect(ix, iconY, iconSize, iconSize);
+                
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.fillRect(ix, iconY, iconSize, iconSize);
+            }
+
+            if (item.finished) {
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(ix, iconY, iconSize, iconSize);
+                drawText("✔", ix + iconSize/2, iconY + iconSize/2, 24, '#4f8', 'center');
+            }
+        });
+
+        // 倒數條 (粉紅)
+        const timerY = iconY + iconSize + 40;
+        
+        ctx.shadowColor = '#ea467e';
+        ctx.shadowBlur = 10;
+        let displayLootTimer = Math.ceil(lootTimer);
+        drawText(displayLootTimer + "秒", winX + winW/2, timerY - 12, 16, '#fff', 'center');
+        ctx.shadowBlur = 0;
+
+        const barFullW = 100;
+        const barX = winX + (winW - barFullW) / 2;
+        
+        ctx.fillStyle = 'rgba(50, 0, 20, 0.8)';
+        ctx.fillRect(barX, timerY, barFullW, 4);
+        
+        ctx.fillStyle = '#ea467e'; 
+        ctx.shadowColor = '#ea467e';
+        ctx.shadowBlur = 5;
+        
+        // 倒數邏輯：減少並防止負數
+        lootTimer -= 0.016; // 約 1/60 秒
+        if (lootTimer < 0) lootTimer = 0;
+
+        ctx.fillRect(barX, timerY, barFullW * (lootTimer / 280.0), 4);
+        ctx.shadowBlur = 0;
+
+        // 按鈕
+        const btnW = 100;
+        const btnH = 32;
+        const btnY = winY + winH - 50;
+        const btnGap = 20;
+        const totalBtnW = (btnW * 3) + (btnGap * 2);
+        const startBtnX = winX + (winW - totalBtnW) / 2;
+
+        const needX = startBtnX;
+        drawCapsuleButton(needX, btnY, btnW, btnH, "🎲", "需求", currentItem.finished);
+
+        const greedX = startBtnX + btnW + btnGap;
+        drawCapsuleButton(greedX, btnY, btnW, btnH, "💰", "貪婪", true); 
+
+        const passX = startBtnX + (btnW + btnGap) * 2;
+        drawCapsuleButton(passX, btnY, btnW, btnH, "✖", "放棄", true);
+
+        // Roll 點數字
+        if (currentItem.rolling || currentItem.finished) {
+             const rollX = needX + btnW/2;
+             const rollY = btnY - 30; 
+             let dispVal = currentItem.val;
+             if (currentItem.rolling) dispVal = Math.floor(Math.random() * 98) + 1;
+             
+             ctx.fillStyle = 'rgba(0,0,0,0.8)';
+             ctx.fillRect(rollX - 25, rollY - 15, 50, 30);
+             ctx.strokeStyle = '#e2c286';
+             ctx.strokeRect(rollX - 25, rollY - 15, 50, 30);
+             drawText(dispVal, rollX, rollY, 20, '#e2c286', 'center');
+        }
+
+        renderChat();
+    }
+
+    // 繪製膠囊按鈕
+    function drawCapsuleButton(x, y, w, h, icon, text, disabled) {
+        const r = h / 2;
+        const grad = ctx.createLinearGradient(0, y, 0, y + h);
+        if (disabled) {
+            grad.addColorStop(0, '#3a3a40');
+            grad.addColorStop(1, '#25252b');
+            ctx.fillStyle = grad;
+            ctx.strokeStyle = '#444';
+        } else {
+            grad.addColorStop(0, '#5e5e6b'); 
+            grad.addColorStop(1, '#41414a');
+            ctx.fillStyle = grad;
+            ctx.strokeStyle = '#777';
+        }
+        
+        drawRoundRect(ctx, x, y, w, h, r);
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // 內容
+        if (disabled) ctx.globalAlpha = 0.5;
+        
+        ctx.font = "16px 'Noto Sans TC'"; 
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        const contentCenterX = x + w/2;
+        const iconX = contentCenterX - 15;
+        const textX = contentCenterX + 10;
+
+        ctx.fillStyle = disabled ? '#888' : '#fff';
+        if (!disabled) {
+            ctx.shadowColor = 'black';
+            ctx.shadowBlur = 2;
+        }
+        
+        ctx.fillText(icon, iconX, y + h/2 + 2);
+        
+        ctx.font = "14px 'Noto Sans TC'";
+        ctx.fillText(text, textX, y + h/2 + 1);
+        
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1.0;
+    }
+
+    function renderChat() {
+        const chatX = 20;
+        let chatY = h - 30;
+        ctx.textAlign = 'left';
+        ctx.font = '14px "Noto Sans TC"';
+        
+        for (let i = chatLog.length - 1; i >= 0; i--) {
+            const msg = chatLog[i];
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = 'black';
+            ctx.strokeText(msg.text, chatX, chatY);
+            
+            ctx.fillStyle = (msg.type === 'sys') ? '#cccccc' : '#e2c286';
+            ctx.fillText(msg.text, chatX, chatY);
+            
+            chatY -= 22;
+            if (chatY < h - 150) break;
+        }
+    }
+
+    function addLog(text, type = 'sys') {
+        chatLog.push({ text, type });
+    }
+
+    // 進入過場動畫後的流程
+    function proceedToVictory() {
+        currentState = STATE.VICTORY;
+        addLog(`任務「${dungeonName}」已完成。`, 'sys');
+        setTimeout(() => {
+            currentState = STATE.LOOT;
+            addLog("獲得了新的戰利品。", 'loot');
+        }, 3000);
+    }
+
+    // --- 互動邏輯 ---
+    canvas.addEventListener('pointerdown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const clickY = e.clientY - rect.top;
+
+        if (currentState === STATE.READY) {
+            const winW = Math.min(w * 0.9, 400);
+            const winH = 220;
+            const winX = (w - winW) / 2;
+            const winY = (h - winH) / 2;
+            const btnY = winY + 165;
+            
+            // 點擊「參加」按鈕區域
+            if (clickY > btnY && clickY < btnY + 40 && clickX > winX + winW - 150) {
+                // 1. 顯示並播放影片
+                video.style.display = 'block';
+                currentState = STATE.VIDEO;
+                
+                video.play().then(() => {
+                    // 影片播放中...
+                }).catch(e => {
+                    console.log("影片播放失敗 (可能是檔案不存在):", e);
+                    // 失敗時直接跳轉到 Victory
+                    video.style.display = 'none';
+                    proceedToVictory();
+                });
+
+                // 2. 監聽影片結束事件
+                video.onended = () => {
+                    video.style.display = 'none';
+                    proceedToVictory();
+                };
+            }
+        } else if (currentState === STATE.LOOT) {
+            const winW = Math.min(w * 0.95, 500);
+            const winH = 320;
+            const winX = (w - winW) / 2;
+            const winY = (h - winH) / 2;
+            
+            // 1. 切換物品
+            const iconSize = 56;
+            const gap = 12;
+            const totalIconW = (lootItems.length * iconSize) + ((lootItems.length - 1) * gap);
+            const startIconX = winX + (winW - totalIconW) / 2;
+            const iconY = winY + 110;
+            
+            lootItems.forEach((item, index) => {
+                const ix = startIconX + index * (iconSize + gap);
+                if (clickX >= ix && clickX <= ix + iconSize && clickY >= iconY && clickY <= iconY + iconSize) {
+                    selectedItemIndex = index;
+                }
+            });
+
+            // 2. 點擊需求
+            const btnW = 100;
+            const btnH = 32;
+            const btnY = winY + winH - 50;
+            const btnGap = 20;
+            const totalBtnW = (btnW * 3) + (btnGap * 2);
+            const startBtnX = winX + (winW - totalBtnW) / 2;
+            const needX = startBtnX;
+
+            if (clickX >= needX && clickX <= needX + btnW && clickY >= btnY && clickY <= btnY + btnH) {
+                const currentItem = lootItems[selectedItemIndex];
+                if (!currentItem.rolling && !currentItem.finished) {
+                    currentItem.rolling = true;
+                    setTimeout(() => {
+                        currentItem.rolling = false;
+                        currentItem.finished = true;
+                        currentItem.val = 99;
+                        addLog(`你對 ${currentItem.name.split(' ')[0]} 擲出了 99 點。`, 'sys');
+                        
+                        const nextIndex = lootItems.findIndex(i => !i.finished);
+                        if (nextIndex !== -1) selectedItemIndex = nextIndex;
+                        
+                        setTimeout(() => {
+                            addLog(`獲得了戰利品 ${currentItem.name}。`, 'loot');
+                        }, 300);
+                    }, 1500);
+                }
+            }
+        }
+    });
+
+    function loop() {
+        if (currentState === STATE.READY) renderReady();
+        else if (currentState === STATE.VICTORY) renderVictory();
+        else if (currentState === STATE.LOOT) renderLoot();
+        requestAnimationFrame(loop);
+    }
+    loop();
+})();
+</script>
+</body>
+</html>
